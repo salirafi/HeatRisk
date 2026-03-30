@@ -163,9 +163,6 @@ def main() -> None:
     print("=== Available GDB layers ===")
     print(layers)
     print("")
-    print("=== Geometry ===")
-    print("CRS:", gdf.crs)
-    print("Geometry types:", gdf.geom_type.unique())
 
     print("=== Fetching done. ===")
 
