@@ -94,9 +94,7 @@ def main():
     df = build_reference()
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
 
-    print("\nSaved file:", OUTPUT_FILE)
+    print("Saved file:", OUTPUT_FILE)
     print("Total rows:", len(df))
-    print("\nPreview:")
-    print(df.head(20).to_string(index=False))
 if __name__ == "__main__":
     main()
