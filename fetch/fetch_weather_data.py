@@ -531,7 +531,7 @@ def main():
         logger.info("Loaded %s reference locations from %s", len(ref_df), REFERENCE_FILE)
 
         df = fetch_all_jakarta_forecasts(ref_df, sleep_seconds=1.01, region_list=None)
-        # set region_list to a list of adm4 codes if you want to fetch only specific regions, otherwise set to None to fetch all regions in the reference file
+        # set region_list to a list of adm4 codes desired, otherwise set to None to fetch all regions in the reference file
 
         if df.empty:
             print("")
