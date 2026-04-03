@@ -753,7 +753,7 @@ def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks, startup_seen):
         modal_body = html.Div(
             children=[
                 html.Div(
-                    "⚠️ Important ⚠️",
+                    "⚠️ Important: OFFLINE UPDATE ⚠️",
                     style={
                         "fontWeight": "700",
                         "fontSize": "1.4rem",
@@ -761,7 +761,12 @@ def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks, startup_seen):
                     }
                 ),
                 html.Div(
-                    "The default current time is currently set to a fixed value (March 22, 2026 11:00 WIB), not the real live current time due to the use of local SQLite database. This will be changed in the future.",
+                    """This app currently uses a locally stored SQLite database that is bundled with the deployment, 
+                    instead of fetching live weather data from an API or cloud server. 
+                    As a result, the forecast data is static and only changes when the database is manually updated and re-uploaded. 
+                    Because regularly refreshing the deployed database is tedious, 
+                    the app uses a fixed default current time (March 22, 2026, 11:00 WIB) that falls within the available data range. 
+                    This will be fixed in the future when the app is ready to be pushed to production phase.""",
                     className="modal-section-text",
                 ),
             ]
