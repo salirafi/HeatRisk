@@ -4,15 +4,18 @@ This repository contains the source code to build a Python-based web application
 
 🎥 [**YOU CAN ACCESS THE LIVE DEMO HERE**](https://jakarta-heat-risk-app.vercel.app/) 🎥
 
-⚠️ **IMPORTANT!** ⚠️  This app currently uses a locally stored SQLite database that is bundled with the deployment, instead of fetching live weather data from an API or cloud server. As a result, the forecast data is static and only changes when the database is manually updated and re-uploaded. Because regularly refreshing the deployed database is tedious, the app uses a fixed default current time (March 22, 2026, 11:00 WIB) that falls within the available data range. This will be fixed in the future when the app is ready to be pushed to production phase.
+⚠️ **IMPORTANT!** ⚠️  
+- The app requires a cloud-hosted MySQL database and uses the live Jakarta time to choose the nearest available forecast snapshot. Missing database environment variables or an unreachable MySQL server will cause the app to raise an error immediately.
+- The app currently refreshes BMKG data on a 36-hour cron schedule, so it does not fetch live data during user interaction, which mainstream weather apps usually do. This will be improved in a future version.
 
 ![Jakarta Heat Risk App](/figures/main_page.png)
+
 
 ## Tools Used
 
 ### Backend
 - Pandas
-- SQLite
+- MySQL
 - Plotly
 
 ### Frontend
@@ -32,19 +35,15 @@ python .\fetch\fetch_weather_data.py
 ```
 This might run for around 4 to 5 minutes (see Content section).
 
+For deployed environments such as Vercel, set the database credentials as environment variables and configure `CRON_SECRET`. The included `vercel.json` triggers `/api/cron_refresh` once per day, and the refresh handler only performs a real sync when the latest successful upload is older than 36 hours by default.
+
 Finally, run
 ```
 python app.py
 ```
 to connect to the web app. 
 
-## Notes
-
-Please note that the web app shows the weather forecast from roughly the user's current system time up to 1 day (by default) to the future whenever data is available. If the database is not up-to-date (the database time coverage does not cover the current Jakarta time), then the app pops out a blocker notification prompting the user to update the database.
-
-If the user wants to run [fetch_boundary_data.py](src/fetch_boundary_data.py), make sure they have downloaded the required .gdb file from [here](https://geoservices.big.go.id/portal/apps/webappviewer/index.html?id=cb58db080712468cb4bfd408dbde3d70).
-
-The current default for `current_time` (the "now" time) is set to March 22 2026, 11:00 WIB. This can be changed as necessary.
+If the user wants to run [fetch_boundary_data.py](src/fetch_boundary_data.py), make sure they have downloaded the required .gdb file from [HERE](https://geoservices.big.go.id/portal/apps/webappviewer/index.html?id=cb58db080712468cb4bfd408dbde3d70).
 
 ## Content
 
@@ -56,33 +55,31 @@ The current default for `current_time` (the "now" time) is set to March 22 2026,
 │   └── fetch_boundary_data.py      # Loads boundary polygons
 |
 ├── tables/  
-│   ├── heat_risk.db               # Main database (weather + boundary data)
-│   ├── create_db.py               # Script to initialize database
+│   ├── jakarta_city_boundary_simplified.geojson
 │
 ├── assets/                        # Static frontend assets
-│   └── (CSS, styling, etc.)
+│   ├── style.css                   # CSS styling
+│   └── ...   
 │
 ├── src/                           
-│   └── Built with Dash Plotly  
+│   ├── constant.py                 # Global variables for app.py
+│   ├── db.py                       # Helpers for MySQL connection
+│   ├── helpers.py                  
+│   └── plotting.py                 # Helpers for plotting functions
 │
-└── app.py                         # Entry point to run the web app with Dash Plotly
+└── app.py                         # Entry point for Dash Plotly web app
 ```
 
-This project depends heavily on [pandas](https://pandas.pydata.org/) and [SQLite](https://sqlite.org/) environment, though no SQLite broswer needs to be installed since all interface is done with Python.
+Note that the only time-dependent data in this project is the BMKG weather data, so the boundary polygon and region code will always be static values.
 
-[fetch](fetch) contains source code for fetching BMKG data ([fetch_weather_data.py](fetch/fetch_weather_data.py)), retrieving region code from [public API](https://wilayah.id/api) ([build_jakarta_preference.py](fetch/build_jakarta_preference.py)), and reading the boundary polygons from RBI data provided by Badan Informasi Geospasial ([fetch_boundary_data.py](fetch/fetch_boundary_data.py)). Note that the only time-dependent data in this repository is the BMKG weather data, so the boundary polygon and region code will always be valid.
+The weather fetch pipeline uploads directly to a cloud MySQL database. Each BMKG refresh run takes about 4 minutes due to the polite delay of 1.01 seconds for each of 261 wards in Jakarta to respect BMKG request limit of 60 requests / minute / IP.
 
-[tables](tables) contains SQLite table for boundary polygon and weather data in `heat_risk.db`. The weather data time coverage spans from March 22 2026 11:00 WIB to March 24 2026 20:00 WIB. User can update, or more precisely append, this data by simply running [fetch_weather_data.py](fetch/fetch_weather_data.py) which will append the table with weather data from the user's current time to three days in the future. If there is overlap, the code will replace the old rows (with the same region code and time stamp). Each run will take up about 4 minutes due to polite delay of 1.01 seconds for each of 261 wards in Jakarta to respect BMKG request limit of 60 requests / minute / IP. The file also contains `create_db.py` to create a SQLite database named `heat_risk.db`. There is also a GeoJSON data stored for Choropleth plot.
-
-[assets](assets) contains all the static assets that are used in the app, including the .css file for styling, while [src](src) contains the source code for creating the web app, making use of [Dash Plotly]([https://shiny.posit.co/py/](https://dash.plotly.com/)).
-
-The parent folder contains [app.py](app.py), script to run the web app.
 
 ## Author's Remarks
 
 This project was inspired by the tropical condition of Jakarta. Average daytime temperature for downtown Jakarta of about $32\degree$ Celcius ([measurements from 1991 to 2000](https://web.archive.org/web/20231019195817/https://www.nodc.noaa.gov/archive/arc0216/0253808/1.1/data/0-data/Region-5-WMO-Normals-9120/Indonesia/CSV/StasiunMeteorologiKemayoran_96745.csv)) and at a fairly consistent value throughout the year makes its population susceptible to some level of heat risks. This is worsen by the climate change that is getting severe for the past several years, with multiple heat waves reported across the globe (see [here](https://wmo.int/news/media-centre/rising-temperatures-and-extreme-weather-hit-asia-hard) for example). Based on the [U.S. National Weather Service](https://www.weather.gov/ama/heatindex#:~:text=Table_title:%20What%20is%20the%20heat%20index?%20Table_content:,the%20body:%20Heat%20stroke%20highly%20likely%20%7C), temperatures just above $32\degree$ Celcius can start to induce some negative effects on human body such as heat exhaustion, heat cramps, and even heat stroke from prolonged exposure. With many Jakartans working outside, for example as *ojol*, street vendors, or just being stuck in traffic under the scorching sunlight, the risk of these complications may be even greater than realized. 
 
-The use of generative AI includes: Github Copilot to help in code syntax and comments/docstring writing, as well as OpenAI's Chat GPT to help with identifying bugs and errors. Outside of those, including problem formulation and framework of thinking, code logical reasoning and writing, from database management using SQLite to web development using Flask, all is done mostly by the author.
+The use of generative AI includes: Github Copilot to help in code syntax and comments/docstring writing, as well as OpenAI's Chat GPT to help with identifying bugs and errors. Outside of those, including problem formulation and framework of thinking, code logical reasoning and writing, from database management to web development using Flask, all is done mostly by the author.
 
 ## Data Sources
 

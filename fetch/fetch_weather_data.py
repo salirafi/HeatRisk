@@ -5,47 +5,41 @@ Fetching is done one-by-one based on region code "adm4" and BMKG restricts acces
 """
 
 import time
+import os
+import sys
 import requests
 import pandas as pd
 import numpy as np
-import sqlite3
 from pathlib import Path
-import logging
+import traceback
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from src.db import get_conn, get_current_jakarta_time
 
 API_URL = "https://api.bmkg.go.id/publik/prakiraan-cuaca"  # BMKG open weather forecast API endpoint
 REFERENCE_FILE = BASE_DIR / "jakarta_reference.csv" # output from build_jakarta_preference.py, containing list of adm4 codes to fetch forecasts for
-DB_PATH = BASE_DIR / "tables" / "heat_risk.db" # SQLite database file to save forecasts into
-WEATHER_TABLE = "ward_weather_table" # SQLite table name to save forecasts into
+WEATHER_TABLE = "ward_weather_table" # table name to save forecasts into
 CITY_SUMMARY_TABLE = "city_summary_table"
-LOG_DIR = BASE_DIR / "logs" # directory to save log files, will be created if it does not exist
-LOG_DIR.mkdir(exist_ok=True)
 
-logging.basicConfig(format='%(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+def get_refresh_interval_hours() -> float:
+    return float(os.getenv("REFRESH_INTERVAL_HOURS", "36"))
 
-def setup_logging() -> None:
-    log_file = LOG_DIR / "bmkg_refresh.log"
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-    )
+def chunk_rows(rows: list[tuple[Any, ...]], chunk_size: int = 500) -> list[list[tuple[Any, ...]]]:
+    return [rows[idx: idx + chunk_size] for idx in range(0, len(rows), chunk_size)] # chunk the rows into smaller batches to avoid hitting database limits on number of rows per insert
 
 # function to add a timestamp column indicating when the data was fetched
-# for tracking data freshness and debugging
 def add_fetched_at(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["fetched_at"] = pd.Timestamp.now(tz="Asia/Jakarta") # get local Jakarta time
+    df["fetched_at"] = get_current_jakarta_time() # get local Jakarta time
     return df
 
 # note: as far as I know (CMIIW), BMKG does not provide a bulk API endpoint for multiple adm4 codes at once,
-# so I will loop over the adm4 codes and fetch them one by one
+# so it will loop over the adm4 codes and fetch them one by one
 def fetch_bmkg_by_adm4(
     adm4: str,
     max_retries: int = 3,
@@ -69,24 +63,17 @@ def fetch_bmkg_by_adm4(
         except requests.exceptions.RequestException as exc:
             last_exc = exc
 
-            # if this was the last attempt, log the exception and re-raise it to be handled by the caller
+            # if this was the last attempt, print the exception and re-raise it to be handled by the caller
             if attempt == max_retries:
-                logger.exception(
-                    "BMKG fetch failed for adm4=%s after %s attempts",
-                    adm4,
-                    max_retries,
-                )
+                print(f"BMKG fetch failed for adm4={adm4} after {max_retries} attempts")
+                print(exc)
                 raise
             
             # calculate backoff time with increasing time with attempts, so wait longer between each retry attempt
             sleep_for = backoff_seconds * (2 ** (attempt - 1))
-            logger.warning(
-                "BMKG fetch failed for adm4=%s on attempt %s/%s: %s. Retrying in %.1f s",
-                adm4,
-                attempt,
-                max_retries,
-                exc,
-                sleep_for,
+            print(
+                f"BMKG fetch failed for adm4={adm4} on attempt {attempt}/{max_retries}: "
+                f"{exc}. Retrying in {sleep_for:.1f} s"
             )
             time.sleep(sleep_for)
 
@@ -95,10 +82,6 @@ def fetch_bmkg_by_adm4(
 # the API returns nested JSON with multiple forecast timestamps per adm4, 
 # but I want one row per timestamp per adm4 for easier analysis and visualization
 def flatten_forecast(data: dict, adm4: str) -> pd.DataFrame:
-    """
-    Flatten BMKG nested JSON into tabular DataFrame
-    Keeps one row per forecast timestamp for one adm4
-    """
     rows = []
 
     data_list = data.get("data", [])
@@ -213,7 +196,7 @@ def build_common_target_grid(df: pd.DataFrame) -> pd.DatetimeIndex:
 
     return pd.date_range(start=common_start, end=common_end, freq="3h")
 
-# one of the most important functions, to align every region's forecast to the same timestamps so they can be compared and visualized together
+# align every region's forecast to the same timestamps so they can be compared and visualized together
 def interpolate_one_adm4_to_grid(df_one: pd.DataFrame, target_grid: pd.DatetimeIndex) -> pd.DataFrame:
     """
     Interpolate one location onto the common target grid.
@@ -330,10 +313,10 @@ def compute_heat_index_c(temp_c: float, rh: float) -> float:
         - 0.00000199 * T * T * RH * RH
     )
 
-    if RH < 13 and 80 <= T <= 112:
+    if RH < 13 and 80 <= T <= 112: # adjustment for low humidity
         adjustment = ((13 - RH) / 4) * np.sqrt((17 - abs(T - 95.0)) / 17)
         HI -= adjustment
-    elif RH > 85 and 80 <= T <= 87:
+    elif RH > 85 and 80 <= T <= 87: # adjustment for high humidity
         adjustment = ((RH - 85) / 10) * ((87 - T) / 5)
         HI += adjustment
 
@@ -355,9 +338,8 @@ def classify_heat_risk(heat_index_c: float) -> str:
     else:
         return "Extreme Danger"
     
-# ########
-# ######
 
+    
 # loading the reference file with the list of adm4 codes and their corresponding location names, 
 # used to fetch forecasts and also to save metadata in the database
 def load_reference_csv(path: Path) -> pd.DataFrame:
@@ -378,7 +360,6 @@ def load_reference_csv(path: Path) -> pd.DataFrame:
     ref_df = ref_df.dropna(subset=["adm4"]).drop_duplicates(subset=["adm4"]) # drop rows with missing adm4 and duplicate adm4, because adm4 is the key for fetching forecasts and saving to database, so it must be unique and not null
     return ref_df.reset_index(drop=True)
 
-# main function to loop over all adm4 codes in the reference file, fetch forecasts, flatten and align them, then save to SQLite database
 def fetch_all_jakarta_forecasts(ref_df: pd.DataFrame, 
                                 sleep_seconds: float = 1.01, 
                                 region_list: list[str] = None) -> pd.DataFrame:
@@ -395,14 +376,9 @@ def fetch_all_jakarta_forecasts(ref_df: pd.DataFrame,
 
     for i, row in ref_df.iterrows():
         adm4 = row["adm4"]
-        logger.info(
-            "[%s/%s] Fetching %s - %s, %s, %s ...",
-            i + 1,
-            total,
-            adm4,
-            row["desa_kelurahan"],
-            row["kecamatan"],
-            row["kota_kabupaten"],
+        print(
+            f"[{i + 1}/{total}] Fetching {adm4} - "
+            f"{row['desa_kelurahan']}, {row['kecamatan']}, {row['kota_kabupaten']} ..."
         )
 
         try:
@@ -410,18 +386,18 @@ def fetch_all_jakarta_forecasts(ref_df: pd.DataFrame,
             df_one = flatten_forecast(data, adm4=adm4)
 
             if df_one.empty:
-                logger.warning("No forecast rows returned for adm4=%s", adm4)
+                print(f"No forecast rows returned for adm4={adm4}")
             else:
                 all_frames.append(df_one)
-                # logger.info("Fetched %s rows for adm4=%s", len(df_one), adm4)
 
         except Exception:
-            logger.exception("Error while processing adm4=%s", adm4)
+            print(f"Error while processing adm4={adm4}")
+            traceback.print_exc()
 
         time.sleep(sleep_seconds) # sleep between requests to avoid hitting rate limits
 
     if not all_frames:
-        logger.warning("No forecast data fetched for any region.")
+        print("No forecast data fetched for any region.")
         return pd.DataFrame()
 
     raw_df = pd.concat(all_frames, ignore_index=True)
@@ -429,130 +405,218 @@ def fetch_all_jakarta_forecasts(ref_df: pd.DataFrame,
     # perform aligning and interpolation to the common grid
     aligned_df = align_all_forecasts_to_common_grid(raw_df)
 
-    logger.info("Combined aligned forecast rows: %s", len(aligned_df))
+    print(f"Combined aligned forecast rows: {len(aligned_df)}")
     return aligned_df
 
-# calculate average value of relevant parameters for each city for plotting
-def build_city_summary_table(df: pd.DataFrame) -> pd.DataFrame:
-    summary = (
-        df
-        .groupby(["local_datetime", "kota_kabupaten"], as_index=False) # group by cities' name and time -> average value each time each city
-        .agg( # perform aggregate function (mean) to each parameter for each city
-            avg_temperature_c=("temperature_c", "mean"),
-            avg_humidity_ptg=("humidity_ptg", "mean"),
-            avg_heat_index_c=("heat_index_c", "mean"),
-        )
-    )
-    return summary
 
-# this function ensures that the SQLite table used to store the forecasts exists before writing data into it
-# If the table does not exist, it creates it. If it already exists, nothing happens.
-def create_table_if_needed(conn: sqlite3.Connection) -> None:
-    conn.execute(
+# this function ensures that the target table used to store the forecasts exists before writing data into it
+def create_weather_table_if_needed(conn) -> None:
+    conn.cursor().execute(
         f"""
         CREATE TABLE IF NOT EXISTS {WEATHER_TABLE} (
-            adm4 TEXT,
-            desa_kelurahan TEXT,
-            kecamatan TEXT,
-            kota_kabupaten TEXT,
-            provinsi TEXT,
-            latitude REAL,
-            longitude REAL,
-            timezone TEXT,
-            local_datetime TEXT,
-            temperature_c REAL,
-            humidity_ptg REAL,
-            heat_index_c REAL,
-            risk_level TEXT,
-            weather_desc TEXT,
-            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY("local_datetime","adm4")
+            adm4 VARCHAR(32) NOT NULL,
+            desa_kelurahan VARCHAR(255),
+            kecamatan VARCHAR(255),
+            kota_kabupaten VARCHAR(255),
+            provinsi VARCHAR(255),
+            latitude DOUBLE,
+            longitude DOUBLE,
+            timezone VARCHAR(64),
+            local_datetime DATETIME NOT NULL,
+            temperature_c DOUBLE,
+            humidity_ptg DOUBLE,
+            heat_index_c DOUBLE,
+            risk_level VARCHAR(64),
+            weather_desc VARCHAR(255),
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (local_datetime, adm4),
+            INDEX idx_weather_time (local_datetime),
+            INDEX idx_weather_region_time (adm4, local_datetime)
         )
         """
     )
     conn.commit()
 
-def save_to_sqlite(df: pd.DataFrame, db_path: Path) -> None:
-    """
-    Delete old rows for the adm4 codes being refreshed, then append fresh rows.
-    """
+
+
+def get_last_refresh_time(conn) -> pd.Timestamp | None:
+    df = pd.read_sql_query(
+        f"""
+        SELECT MAX(fetched_at) AS fetched_at
+        FROM {WEATHER_TABLE}
+        WHERE fetched_at IS NOT NULL
+        """,
+        conn,
+    )
     if df.empty:
-        logger.warning("DataFrame is empty. Nothing to save.")
+        return None
+
+    ts = pd.to_datetime(df.iloc[0]["fetched_at"], errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def should_refresh(conn, min_interval_hours: float | None = None) -> tuple[bool, pd.Timestamp | None]:
+    min_interval_hours = get_refresh_interval_hours() if min_interval_hours is None else min_interval_hours
+    last_refresh = get_last_refresh_time(conn) # get the last refresh time from fetched_at column
+
+    if last_refresh is None:
+        return True, None # if there is no record of last refresh, refresh
+
+    elapsed = get_current_jakarta_time() - last_refresh
+    return elapsed >= pd.Timedelta(hours=min_interval_hours), last_refresh
+
+
+# saving to MySQL database, with upsert logic to avoid creating duplicate rows for the same timestamp and region
+def save_to_mysql(df: pd.DataFrame, conn) -> None:
+
+    if df.empty:
+        print("DataFrame is empty. Nothing to save.")
         return
 
-    conn = sqlite3.connect(db_path)
+    create_weather_table_if_needed(conn)
 
-    try:
-        create_table_if_needed(conn)
+    weather_df = df.copy()
+    weather_df["local_datetime"] = pd.to_datetime(weather_df["local_datetime"]).dt.to_pydatetime()
+    weather_df["fetched_at"] = pd.to_datetime(weather_df["fetched_at"]).dt.to_pydatetime()
 
-        df_to_save = df.copy()
+    weather_rows = [ # extract relevant columns
+        (
+            row["adm4"],
+            row["desa_kelurahan"],
+            row["kecamatan"],
+            row["kota_kabupaten"],
+            row["provinsi"],
 
-        df_to_save["local_datetime"] = df_to_save["local_datetime"].astype(str) # convert datetime to string for SQLite, because SQLite does not have a native datetime type
-        df_to_save["fetched_at"] = df_to_save["fetched_at"].astype(str)
+            # lat/lon not used
+            # None if pd.isna(row["latitude"]) else float(row["latitude"]),
+            # None if pd.isna(row["longitude"]) else float(row["longitude"]),
 
-        df_to_save.to_sql(WEATHER_TABLE, conn, if_exists="replace", index=False) # IMPORTANT! this will replace all existing rows so no past data recorded
-
-        # create SQL indexes for faster querying
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_weather_time
-            ON ward_weather_table(local_datetime);
-            """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_weather_region_time
-            ON ward_weather_table(adm4, local_datetime);
-            """)
-
-        summary_df = build_city_summary_table(df)
-        summary_df.to_sql(
-            CITY_SUMMARY_TABLE,
-            conn,
-            if_exists="replace",
-            index=False,
+            row["timezone"],
+            row["local_datetime"],
+            None if pd.isna(row["temperature_c"]) else float(row["temperature_c"]),
+            None if pd.isna(row["humidity_ptg"]) else float(row["humidity_ptg"]),
+            None if pd.isna(row["heat_index_c"]) else float(row["heat_index_c"]),
+            row["risk_level"],
+            row["weather_desc"],
+            row["fetched_at"],
         )
-        # build indexing for faster query
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_city_summary_time
-            ON {CITY_SUMMARY_TABLE} (local_datetime);
-            """)
+        for _, row in weather_df.iterrows()
+    ]
 
-        conn.commit()
+    # ON DUPLICATE KEY UPDATE will update the existing row if there is a conflict on the primary key (local_datetime, adm4)
+    # this is because the fetched time should overlap with the last fetched time (36 hours-interval while the data is in 72 hours range)
+    weather_sql = f"""
+        INSERT INTO {WEATHER_TABLE} (
+            adm4, desa_kelurahan, kecamatan, kota_kabupaten, provinsi,
+            latitude, longitude, timezone, local_datetime,
+            temperature_c, humidity_ptg, heat_index_c, risk_level,
+            weather_desc, fetched_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            desa_kelurahan = VALUES(desa_kelurahan),
+            kecamatan = VALUES(kecamatan),
+            kota_kabupaten = VALUES(kota_kabupaten),
+            provinsi = VALUES(provinsi),
+            latitude = VALUES(latitude),
+            longitude = VALUES(longitude),
+            timezone = VALUES(timezone),
+            temperature_c = VALUES(temperature_c),
+            humidity_ptg = VALUES(humidity_ptg),
+            heat_index_c = VALUES(heat_index_c),
+            risk_level = VALUES(risk_level),
+            weather_desc = VALUES(weather_desc),
+            fetched_at = VALUES(fetched_at)
+    """
 
+    cursor = conn.cursor()
+    for rows_chunk in chunk_rows(weather_rows): # execute the insert in chunks to avoid hitting MySQL limits on number of rows per insert
+        cursor.executemany(weather_sql, rows_chunk)
+
+    conn.commit()
+    cursor.close()
+
+
+def save_forecasts(df: pd.DataFrame) -> None:
+    conn = get_conn()
+    try:
+        save_to_mysql(df, conn)
     finally:
         conn.close()
 
-def main():
-    setup_logging()
+# main function to run the whole refresh process
+def run_refresh_job(
+    sleep_seconds: float = 1.01, # sleep to stay under BMKG API rate limit
+    region_list: list[str] | None = None, # list of adm4 codes; if None, fetch for all codes
+) -> dict[str, Any]:
+    ref_df = load_reference_csv(REFERENCE_FILE) # contains list of adm4 Jakarta codes and their location names
+    print(f"Loaded {len(ref_df)} reference locations from {REFERENCE_FILE}")
+
     print("")
-    logger.info("=== BMKG refresh job started ===")
+    print("Configured database backend: mysql")
+    print("")
+    conn = get_conn()
+    try:
+        create_weather_table_if_needed(conn)
+        should_run, last_refresh = should_refresh(conn) # determine whether to run refresh
+    finally:
+        conn.close()
+
+    if not should_run: # skipping refresh
+        print(
+            f"Skipping refresh because the latest successful sync at {last_refresh} is still within {get_refresh_interval_hours():.1f} hours."
+        )
+        return {
+            "status": "skipped",
+            "backend": "mysql",
+            "last_refresh": None if last_refresh is None else str(last_refresh),
+            "reason": f"Latest refresh is newer than {get_refresh_interval_hours():.1f} hours.",
+        }
+
+    df = fetch_all_jakarta_forecasts(ref_df, sleep_seconds=sleep_seconds, region_list=region_list)
+    # set region_list to a list of adm4 codes desired, otherwise set to None to fetch all regions in the reference file
+
+    if df.empty:
+        print("No forecast data fetched. Nothing saved.")
+        return {"status": "empty", "backend": "mysql", "rows": 0}
+
+    df = add_fetched_at(df)
+    save_forecasts(df) # save to MySQL
+
+    return {
+        "status": "success",
+        "backend": "mysql",
+        "rows": int(len(df)),
+        "fetched_at": str(df["fetched_at"].iloc[0]),
+    }
+
+def main():
+    print("")
+    print("========= BMKG refresh job started =========")
     print("")
 
     try:
-        ref_df = load_reference_csv(REFERENCE_FILE)
-        logger.info("Loaded %s reference locations from %s", len(ref_df), REFERENCE_FILE)
-
-        df = fetch_all_jakarta_forecasts(ref_df, sleep_seconds=1.01, region_list=None)
-        # set region_list to a list of adm4 codes desired, otherwise set to None to fetch all regions in the reference file
-
-        if df.empty:
+        result = run_refresh_job(sleep_seconds=1.01, region_list=None)
+        if result["status"] in {"empty", "skipped"}:
             print("")
-            logger.warning("No forecast data fetched. Nothing saved.")
+            print(f"Refresh finished with status={result['status']}")
             print("")
-            return 1
-
-        df = add_fetched_at(df)
-        save_to_sqlite(df, DB_PATH)
+            return 0
 
         print("")
-        logger.info("=== BMKG refresh job completed successfully ===")
+        print("========= BMKG refresh job completed successfully =========")
         print("")
 
         return 0
     
     except Exception:
         print("")
-        logger.exception("=== BMKG refresh job failed ===")
+        print("========= BMKG refresh job failed =========")
+        traceback.print_exc()
         print("")
         return 1
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main()) # SystemExit for cron

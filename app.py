@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 '''
 Source code to create the web app.
-Note that the pipeline of the code, in default, does not allow outputs of past weather data.
-This can be changed by changing current_time variable, but note that the definition of 'current time' will not mean the present time anymore.
+The app window is built around the current Jakarta time.
 '''
 
 from dash import Dash, html, dcc, Input, Output, State, ctx
@@ -13,21 +12,31 @@ from src.constant import (
     RISK_LABEL_MAP,
     HEAT_RISK_GUIDE,
     WEATHER_ICON_MAP,
-    RISK_ABBR,
-    WEATHER_TABLE,
+    RISK_ABBR
 )
 from src.helpers import *
 from src.plotting import *
+from src.db import get_current_jakarta_time # current Jakarta time
 
-boundary_json = load_boundary_data() # pd.DataFrame and JSON dict
-# current_time  = pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None) # definition of current_time
-current_time = pd.Timestamp(year=2026, month=3, day=22, hour=11)
+boundary_json = load_boundary_data() # city-level boundary GeoJSON dict for the Regional Info page
 
 app = Dash(__name__, suppress_callback_exceptions=True)
 
-# helper to make the header section
+EMPTY_FIG = {
+    "data": [],
+    "layout": {
+        "xaxis": {"visible": False},
+        "yaxis": {"visible": False},
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+    },
+}
+
+
+# HEADER SECTION
 def make_header(pathname="/location"):
-    # divide the app into two pages
+    
     location_active = "nav-link active" if pathname in ["/", "/location"] else "nav-link"
     map_active      = "nav-link active" if pathname == "/map" else "nav-link"
 
@@ -52,11 +61,11 @@ def make_header(pathname="/location"):
                 ],
             ),
 
-            # showing text "DB updated"
+            # showing last time DB was updated
             html.Div(
                 className="header-meta",
                 children=[
-                    html.Span("DB updated ", className="meta-label"),
+                    html.Span("DB last updated ", className="meta-label"),
                     html.Span(get_last_db_update(), className="meta-value"),
                 ],
             ),
@@ -64,31 +73,31 @@ def make_header(pathname="/location"):
     )
 
 
-# ##############
-#  Helpers Related to Data
-# ##############
 
 # get the nearest available time in the database from the current time
+# this is needed since the data is 3-hourly forecast
 def get_nearest_current_time_from_store(times_data):
     times = deserialize_timestamps(times_data)
     if not times:
         return None
     times_series = pd.Series(times)
+    current_time = get_current_jakarta_time()
     nearest_idx  = (times_series - current_time).abs().idxmin()
     return pd.Timestamp(times_series.loc[nearest_idx])
 
-# default queried database has time coverage of 1 day
+
 def get_default_query_window():
+    current_time = get_current_jakarta_time()
     return {
         "start_time": current_time,
-        "end_time":   current_time + pd.Timedelta(days=1.0),
+        "end_time":   current_time + pd.Timedelta(days=2.0), # default queried database has time coverage of 2 days
     }
 
 # get the available timestamps from the queried window
 def load_forecast_times():
     window     = get_default_query_window()
 
-    # 3 hours offset to start_time is ti include the timestamp corresponds to the exact current time
+    # 3 hours offset to start_time is to include the timestamp corresponds to the exact current time
     # if no offset, the earliest timestamp queried will be AFTER the current time
     start_time = pd.to_datetime(window["start_time"]) - pd.Timedelta(hours=3.0)
     end_time   = pd.to_datetime(window["end_time"])   + pd.Timedelta(hours=3.0)
@@ -108,25 +117,14 @@ def load_current_snapshot_df(selected_ward, times_data):
         return pd.DataFrame()
     conn = get_conn()
     try:
-        # this ideally should output only a single row 
-        # since combination of code and timestamp is unique
-        df_region = pd.read_sql_query(
-            f"SELECT adm4 FROM {WEATHER_TABLE} WHERE desa_kelurahan = ? LIMIT 1",
-            conn, params=[selected_ward],
-        )
-        if df_region.empty:
+        # this ideally should output only a single row since combination of code and timestamp is unique
+        adm4 = get_adm4_for_ward(selected_ward, conn)
+        if adm4 is None:
             return pd.DataFrame()
-        snap = current_condition(df_region.iloc[0]["adm4"], nearest_time, conn)
+        snap = current_condition(adm4, nearest_time, conn)
     finally:
         conn.close()
     return snap
-
-# get data for evolution plot
-def load_heat_index_evolution_values(selected_ward, times_data):
-    df = load_future_forecast_df(selected_ward, times_data)
-    if df.empty:
-        return None
-    return create_heat_index_arr(df) # create the suitable array structure for plotting
 
 # load future forecast dataframe for a selected ward 
 # between nearest current forecast time and the query window end time
@@ -141,14 +139,10 @@ def load_future_forecast_df(selected_ward, times_data):
     end_time = get_default_query_window()["end_time"] # plus 1-day (default) from start_time
     conn = get_conn()
     try:
-        df_region = pd.read_sql_query(
-            # do SQL query to retrieve time, HI, risk level, and ward
-            f"SELECT adm4 FROM {WEATHER_TABLE} WHERE desa_kelurahan = ? LIMIT 1",
-            conn, params=[selected_ward],
-        )
-        if df_region.empty:
+        adm4 = get_adm4_for_ward(selected_ward, conn)
+        if adm4 is None:
             return pd.DataFrame()
-        df = future_forecast(df_region.iloc[0]["adm4"], current_time_df, end_time, conn)
+        df = future_forecast(adm4, current_time_df, end_time, conn)
     finally:
         conn.close()
     return df
@@ -209,15 +203,6 @@ def build_map_legend():
         ],
     )
 
-def build_metric_card(label, value, extra_class=""):
-    return html.Div(
-        className=f"metric-card {extra_class}".strip(),
-        children=[
-            html.Div(label, className="metric-label"),
-            html.Div(value, className="metric-value"),
-        ],
-    )
-
 # function to construct the heat risk guide section
 def build_heat_risk_guide():
     levels = ["Lower Risk", "Caution", "Extreme Caution", "Danger", "Extreme Danger"]
@@ -268,19 +253,27 @@ def build_heat_risk_guide():
     )
 
 
-# ───────────
+# ===================
 #  Page Layouts
-# ───────────
+# ===================
 
 # options to be displayed to the search bar
 # all available wards will be listed
-options = make_ward_search_options(get_conn())
+def load_search_options():
+    conn = get_conn()
+    try:
+        return make_ward_search_options(conn)
+    finally:
+        conn.close()
+
+
+options = load_search_options()
 
 def location_layout():
     return html.Div(
         className="right-panel",
         children=[
-            # ── Search bar row ──
+            # search bar row
             html.Div(
                 className="search-bar-row",
                 children=[
@@ -301,7 +294,7 @@ def location_layout():
                     html.Div(className="search-spacer"),
                 ],
             ),
-            # ── Dynamic content ──
+            # dynamic
             html.Div(id="location_content_ui", className="location-body"),
         ],
     )
@@ -310,7 +303,7 @@ def map_layout():
     return html.Div(
         className="right-panel right-panel-map",
         children=[
-            # Time slider
+            # time slider
             html.Div(
                 className="slider-row",
                 children=[
@@ -327,39 +320,26 @@ def map_layout():
                     ),
                 ],
             ),
-            # Map + summary side-by-side
+            # map side-by-side
             html.Div(
                 className="map-content-row",
                 children=[
                     html.Div(
-                        className="map-section",
+                        className="map-section map-section-full",
                         children=[
                             dcc.Graph(
-                                id="heat_risk_map", figure={},
+                                id="heat_risk_map", figure=EMPTY_FIG,
                                 config={"displayModeBar": False},
                                 style={"height": "100%", "width": "100%"},
                             ),
                             html.Div(id="map_legend", className="legend-container"),
                         ],
                     ),
-                    html.Div(
-                        className="map-section summary-section",
-                        children=[
-                            html.Div(
-                                className="summary-center",
-                                children=[
-                                    dcc.Graph(
-                                        id="city_summary_plot", figure={},
-                                        config={"displayModeBar": False},
-                                    ),
-                                ],
-                            ),
-                        ],
-                    ),
                 ],
             ),
         ],
     )
+
 
 # create instance when users don't select ward
 def build_empty_location_state():
@@ -389,22 +369,18 @@ def build_location_content():
             className="evolution-section",
             children=[
                 dcc.Graph(
-                    id="heat_index_evolution_plot", figure={},
+                    id="evolution_timeline_ui", figure=EMPTY_FIG,
                     config={"displayModeBar": False},
                     style={"height": "100%", "width": "100%"},
-                ),
-                html.Div(
-                    "*Gap between heat index and temperature reflects humidity.",
-                    className="plot-note",
                 ),
             ],
         ),
     ]
 
 
-# ##############
+# ===================
 #  Root Layout
-# #############
+# ===================
 
 app.layout = html.Div(
     className="app-shell",
@@ -492,33 +468,10 @@ via free public API.
 )
 
 
-# ###################
+# ========================
 #  Callback Functions
-# ################
+# ========================
 
-# # callbak for showing start-up modal; comment this in the future
-# @app.callback(
-#     Output("guide-modal", "className", allow_duplicate=True),
-#     Output("modal-content", "children", allow_duplicate=True),
-#     Output("startup-modal-seen", "data"),
-#     Input("url", "pathname"),
-#     State("startup-modal-seen", "data"),
-#     prevent_initial_call=False,
-# )
-# def show_startup_modal(_pathname, seen):
-#     if seen:
-#         return "modal-overlay", "", True
-
-#     modal_body = html.Div(
-#         children=[
-#             html.Div("Notice", className="modal-risk-title"),
-#             html.Div(
-#                 "The default current time is currently set to a fixed value, not the real live current time due to the use of local SQLite database. This will be changed in the future.",
-#                 className="modal-section-text",
-#             ),
-#         ]
-#     )
-#     return "modal-overlay modal-show", modal_body, True
 
 @app.callback(
     Output("header-container", "children"),
@@ -620,20 +573,18 @@ def future_forecast_cards_ui(selected_ward, times_data):
     return build_forecast_cards(df)
 
 @app.callback(
-    Output("heat_index_evolution_plot", "figure"),
-    Input("selected_ward_search",       "value"),
-    Input("forecast-times-store",       "data"),
+    Output("evolution_timeline_ui", "figure"),
+    Input("selected_ward_search",   "value"),
+    Input("forecast-times-store",   "data"),
 )
-def heat_index_evolution_plot(selected_ward, times_data):
+def evolution_timeline_ui(selected_ward, times_data):
     if not selected_ward:
         return {}
-    evolution_values = load_heat_index_evolution_values(selected_ward, times_data)
-    if evolution_values is None:
+    df = load_future_forecast_df(selected_ward, times_data)
+    if df.empty:
         return {}
-    fig = build_heat_index_plot(evolution_values=evolution_values)
-
-    # this does not change the UI, so it should be faster to load
-    fig.update_layout(uirevision="heat-index-evolution")
+    fig = build_heat_index_plot(df=df.head(6).copy())
+    fig.update_layout(uirevision="weather-timeline")
     return fig
 
 # callback for displaying the current time and database's timestamp
@@ -643,16 +594,29 @@ def heat_index_evolution_plot(selected_ward, times_data):
     Input("forecast-times-store",        "data"),
 )
 def current_snapshot_time_text(selected_ward, times_data):
+    current_time = get_current_jakarta_time()
+    current_time_text = current_time.strftime('%b %d, %H:%M')
 
     # if no ward selected, show placeholder "-"
     if not selected_ward:
-        return f"Now: {current_time.strftime('%b %d, %H:%M')}  ·  Data: —"
-    data_time = get_nearest_current_time_from_store(times_data)
-    if data_time is None:
-        return f"Now: {current_time.strftime('%b %d, %H:%M')}  ·  Data: —"
-    return (
-        f"Now: {current_time.strftime('%b %d, %H:%M')}  ·  "
-        f"Data: {data_time.strftime('%b %d, %H:%M')}"
+        data_time_text = "—"
+    else:
+        data_time = get_nearest_current_time_from_store(times_data)
+        data_time_text = "—" if data_time is None else data_time.strftime('%b %d, %H:%M')
+
+    return html.Div(
+        className="time-meta-card",
+        children=[
+            html.Div("Current Jakarta Time", className="time-meta-label"),
+            html.Div(current_time_text, className="time-meta-now"),
+            html.Div(
+                [
+                    html.Span("Forecast snapshot", className="time-meta-data-label"),
+                    html.Span(data_time_text, className="time-meta-data-value"),
+                ],
+                className="time-meta-data",
+            ),
+        ],
     )
 
 @app.callback(
@@ -691,12 +655,16 @@ def heat_risk_map(selected_idx, times_data):
         return {}
     conn = get_conn()
     try:
-        colormap = create_dynamic_colormap(selected_time=selected_time, conn=conn)
+        colormap = create_dynamic_colormap(
+            selected_time=selected_time,
+            boundary_geojson=boundary_json,
+            conn=conn,
+        )
     finally:
         conn.close()
     fig = build_map_figure(
         boundary_geojson=boundary_json,
-        locations=colormap["customdata"][:, -1].tolist(),
+        locations=colormap["locations"],
         colormap=colormap,
     )
 
@@ -712,29 +680,8 @@ def map_legend(_):
     return build_map_legend()
 
 @app.callback(
-    Output("city_summary_plot",   "figure"),
-    Input("selected_time_idx",    "value"),
-    State("forecast-times-store", "data"),
-)
-def city_summary_plot(selected_idx, times_data):
-    selected_time = get_selected_time_from_store(selected_idx, times_data)
-    if selected_time is None:
-        return {}
-    conn = get_conn()
-    try:
-        summary = city_summary_at_time(selected_time=selected_time, conn=conn)
-    finally:
-        conn.close()
-    fig = build_city_summary_plot(summary_value=summary)
-
-    # this does not change the UI, so it should be faster to load
-    fig.update_layout(uirevision="city-summary")
-    return fig
-
-@app.callback(
     Output("guide-modal", "className"),
     Output("modal-content", "children"),
-    Output("startup-modal-seen", "data"),
     Input("url", "pathname"),
     Input("guide-btn-1", "n_clicks"),
     Input("guide-btn-2", "n_clicks"),
@@ -742,40 +689,11 @@ def city_summary_plot(selected_idx, times_data):
     Input("guide-btn-4", "n_clicks"),
     Input("guide-btn-5", "n_clicks"),
     Input("modal-close", "n_clicks"),
-    State("startup-modal-seen", "data"),
     prevent_initial_call=False,
 )
-def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks, startup_seen):
+def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks):
     trigger = ctx.triggered_id
 
-    # show startup modal only once per browser session; comment this in the future
-    if trigger in (None, "url") and not startup_seen:
-        modal_body = html.Div(
-            children=[
-                html.Div(
-                    "⚠️ IMPORTANT! ⚠️",
-                    style={
-                        "fontWeight": "700",
-                        "fontSize": "1.4rem",
-                        "marginBottom": "10px"
-                    }
-                ),
-                html.Div(
-                    """This app currently uses a locally stored SQLite database that is bundled with the deployment, 
-                    instead of fetching live weather data from an API or cloud server. 
-                    As a result, the forecast data is static and only changes when the database is manually updated and re-uploaded. 
-                    Because regularly refreshing the deployed database is tedious, 
-                    the app uses a fixed default current time (March 22, 2026, 11:00 WIB) that falls within the available data range. 
-                    This will be fixed in the future when the app is ready to be pushed to production phase.""",
-                    className="modal-section-text",
-                ),
-            ]
-        )
-        return "modal-overlay modal-show", modal_body, True
-
-    # close modal
-    if trigger == "modal-close":
-        return "modal-overlay", "", startup_seen
 
     level_map = {
         "guide-btn-1": "Lower Risk",
@@ -787,7 +705,7 @@ def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks, startup_seen):
     level = level_map.get(trigger)
 
     if level is None:
-        return "modal-overlay", "", startup_seen
+        return "modal-overlay", ""
 
     guide = HEAT_RISK_GUIDE[level]
 
@@ -827,7 +745,7 @@ def toggle_modal(_pathname, b1, b2, b3, b4, b5, close_clicks, startup_seen):
             ),
         ]
     )
-    return "modal-overlay modal-show", modal_body, startup_seen
+    return "modal-overlay modal-show", modal_body
 
 if __name__ == "__main__":
     app.run()
