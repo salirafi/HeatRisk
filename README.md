@@ -55,7 +55,8 @@ If the user wants to run [fetch_boundary_data.py](src/fetch_boundary_data.py), m
 │   └── fetch_boundary_data.py      # Loads boundary polygons
 |
 ├── tables/  
-│   ├── jakarta_city_boundary_simplified.geojson
+│   ├── jakarta_city_boundary_simplified.geojson    # Polygon data for city-level boundary
+│   ├── jakarta_boundary_simplified.geojson         # Polygon data for ward-level boundary
 │
 ├── assets/                        # Static frontend assets
 │   ├── style.css                  # CSS styling

@@ -50,27 +50,50 @@ def build_map_figure(
 
     fig = go.Figure()
 
+    # fig.add_trace(
+    #     go.Choropleth(
+    #         geojson=boundary_geojson, # boundary polygon in JSON dict
+    #         locations=locations, # location index to polygon in string
+    #         z=colormap["z"], # color
+    #         customdata=colormap["customdata"], # other data
+    #         featureidkey="properties.city_name",
+    #         zmin=0,
+    #         zmax=len(RISK_ORDER) - 1,
+    #         colorscale=colorscale,
+    #         showscale=False,
+    #         marker_line_color="rgba(70,70,70,0.8)",
+    #         marker_line_width=0.8,
+    #         hovertemplate=(
+    #             "&nbsp;<b>%{customdata[0]}</b>&nbsp;<br>"
+    #             "&nbsp;%{customdata[1]}&nbsp;<br>"
+    #             "&nbsp;Avg HI %{customdata[2]:.1f} °C - %{customdata[3]}&nbsp;<br>"
+    #             "&nbsp;Avg Temp %{customdata[5]:.1f} °C - Avg Humidity %{customdata[6]:.0f}%&nbsp;<br>"
+    #             "&nbsp;%{customdata[4]}&nbsp;"
+    #             "<extra></extra>"
+    #         )
+    #     )
+
     fig.add_trace(
-        go.Choropleth(
-            geojson=boundary_geojson, # boundary polygon in JSON dict
-            locations=locations, # location index to polygon in string
-            z=colormap["z"], # color
-            customdata=colormap["customdata"], # other data
-            featureidkey="properties.city_name",
+        go.Choroplethmap(
+            geojson=boundary_geojson,
+            locations=locations,
+            z=colormap["z"],
+            customdata=colormap["customdata"],
+            featureidkey="properties.adm4",
             zmin=0,
             zmax=len(RISK_ORDER) - 1,
             colorscale=colorscale,
             showscale=False,
-            marker_line_color="rgba(70,70,70,0.8)",
-            marker_line_width=0.8,
+            # opacity=0.7,
+            marker_line_color="rgba(70,70,70,0.85)",
+            marker_line_width=1.0,
             hovertemplate=(
-                "&nbsp;<b>%{customdata[0]}</b>&nbsp;<br>"
-                "&nbsp;%{customdata[1]}&nbsp;<br>"
-                "&nbsp;Avg HI %{customdata[2]:.1f} °C - %{customdata[3]}&nbsp;<br>"
-                "&nbsp;Avg Temp %{customdata[5]:.1f} °C - Avg Humidity %{customdata[6]:.0f}%&nbsp;<br>"
-                "&nbsp;%{customdata[4]}&nbsp;"
+                "&nbsp;<b>%{customdata[0]}, %{customdata[1]}</b>&nbsp;<br>"
+                "&nbsp;%{customdata[2]|%b %d %H:%M}&nbsp;<br>"
+                f"&nbsp;{'HI'} %{{customdata[3]:.1f}} °C - %{{customdata[4]}}&nbsp;<br>"
+                "&nbsp;%{customdata[5]}&nbsp;"
                 "<extra></extra>"
-            )
+            ),
         )
     )
 
@@ -82,22 +105,39 @@ def build_map_figure(
         projection=dict(scale=5, type="bonne")
     )
 
+    # fig.update_layout(
+    #     height=None,
+    #     autosize=True,
+    #     margin=dict(l=0, r=0, t=0, b=0, autoexpand=True),
+    #     paper_bgcolor="rgba(0,0,0,0)",
+    #     plot_bgcolor="rgba(0,0,0,0)",
+    #     showlegend=False,
+    #     hoverlabel=dict(
+    #         bgcolor="rgba(203, 210, 200, 0.4)",
+    #         font_size=13,
+    #         font_family="Arial",
+    #         font_color="#222",
+    #         bordercolor="rgba(0,0,0,0.9)",
+    #         align="left",
+    #         namelength=-1,
+    #     )
+    # )
+    fig.update_traces(marker_opacity=0.55, selector=dict(type='choroplethmap')) # set opacity
     fig.update_layout(
-        height=None,
-        autosize=True,
-        margin=dict(l=0, r=0, t=0, b=0, autoexpand=True),
+        map=dict(
+            style="carto-positron",
+            center={"lon": 106.8456, "lat": -6.2088},
+            zoom=10.5,
+        ),
+        margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
         hoverlabel=dict(
-            bgcolor="rgba(203, 210, 200, 0.4)",
+            bgcolor="rgba(203, 210, 200, 0.85)",
             font_size=13,
             font_family="Arial",
             font_color="#222",
-            bordercolor="rgba(0,0,0,0.9)",
-            align="left",
-            namelength=-1,
-        )
+        ),
     )
 
     return fig
@@ -127,76 +167,129 @@ def make_discrete_colorscale():
 
 
 
-# function to create the colormap
-# the choropleth figure itself will be built in the app.py callback function for faster loading logic
+# # function to create the colormap
+# # the choropleth figure itself will be built in the app.py callback function for faster loading logic
+# def create_dynamic_colormap(
+#     selected_time: pd.Timestamp,
+#     boundary_geojson: dict,
+#     conn,
+# ):
+#     selected_time = pd.to_datetime(selected_time).strftime("%Y-%m-%d %H:%M:%S")
+
+#     # query = f"""
+#     #     SELECT
+#     #         COALESCE(kota_kabupaten, '') AS kota_kabupaten,
+#     #         local_datetime,
+#     #         temperature_c,
+#     #         humidity_ptg,
+#     #         heat_index_c,
+#     #         COALESCE(weather_desc, '') AS weather_desc
+#     #     FROM {WEATHER_TABLE}
+#     #     WHERE local_datetime = '{selected_time}'
+#     #     ORDER BY kota_kabupaten
+#     # """
+
+#     weather_df = run_query(query, conn)
+#     boundary_index = pd.DataFrame(
+#         {
+#             "city_name": [
+#                 short_city_name(feature.get("properties", {}).get("city_name", ""))
+#                 for feature in boundary_geojson.get("features", [])
+#             ]
+#         }
+#     )
+#     boundary_index = (
+#         boundary_index
+#         .dropna(subset=["city_name"])
+#         .query("city_name != ''")
+#         .drop_duplicates(subset=["city_name"])
+#         .sort_values("city_name")
+#         .reset_index(drop=True)
+#     )
+
+#     if weather_df.empty:
+#         weather_df = pd.DataFrame(
+#             columns=[
+#                 "city_name",
+#                 "local_datetime",
+#                 "avg_temperature_c",
+#                 "avg_humidity_ptg",
+#                 "avg_heat_index_c",
+#                 "weather_desc",
+#                 "risk_level",
+#             ]
+#         )
+#     else:
+#         weather_df["city_name"] = weather_df["kota_kabupaten"].apply(short_city_name)
+#         weather_df = (
+#             weather_df
+#             .groupby("city_name", as_index=False)
+#             .agg(
+#                 local_datetime=("local_datetime", "first"),
+#                 avg_temperature_c=("temperature_c", "mean"),
+#                 avg_humidity_ptg=("humidity_ptg", "mean"),
+#                 avg_heat_index_c=("heat_index_c", "mean"),
+#                 weather_desc=("weather_desc", most_common_weather),
+#             )
+#         )
+#         weather_df["risk_level"] = weather_df["avg_heat_index_c"].apply(classify_city_risk)
+
+#     merged = boundary_index.merge(weather_df, on="city_name", how="left")
+#     merged["risk_level"] = merged["risk_level"].fillna("No Data")
+#     merged["weather_desc"] = merged["weather_desc"].fillna("")
+#     merged["local_datetime"] = merged["local_datetime"].apply(format_timestamp)
+
+#     z = (
+#         merged["risk_level"]
+#         .map(RISK_CODE_MAP)
+#         .fillna(RISK_CODE_MAP["No Data"])
+#         .astype(float)
+#         .to_numpy()
+#     )
+
+#     customdata = np.column_stack([
+#             merged["city_name"].astype(str).to_numpy(),
+#             merged["local_datetime"].astype(str).to_numpy(),
+#             merged["avg_heat_index_c"].to_numpy(dtype=object),
+#             merged["risk_level"].astype(str).to_numpy(),
+#             merged["weather_desc"].astype(str).to_numpy(),
+#             merged["avg_temperature_c"].to_numpy(dtype=object),
+#             merged["avg_humidity_ptg"].to_numpy(dtype=object),
+#             merged["city_name"].astype(str).to_numpy(),
+#         ])
+
+#     return {
+#         "z": z,
+#         "customdata": customdata,
+#         "locations": merged["city_name"].astype(str).tolist(),
+#     }
+
 def create_dynamic_colormap(
     selected_time: pd.Timestamp,
-    boundary_geojson: dict,
     conn,
 ):
     selected_time = pd.to_datetime(selected_time).strftime("%Y-%m-%d %H:%M:%S")
 
     query = f"""
         SELECT
-            COALESCE(kota_kabupaten, '') AS kota_kabupaten,
-            local_datetime,
-            temperature_c,
-            humidity_ptg,
-            heat_index_c,
-            COALESCE(weather_desc, '') AS weather_desc
-        FROM {WEATHER_TABLE}
-        WHERE local_datetime = '{selected_time}'
-        ORDER BY kota_kabupaten
+            b.adm4 AS adm4,
+            COALESCE(w.desa_kelurahan, '') AS desa_kelurahan,
+            COALESCE(w.kecamatan, '') AS kecamatan,
+            w.local_datetime AS local_datetime,
+            w.heat_index_c AS heat_index_c,
+            COALESCE(w.risk_level, 'No Data') AS risk_level,
+            COALESCE(w.weather_desc, '') AS weather_desc
+        FROM map_boundary_index b
+        LEFT JOIN {WEATHER_TABLE} w
+            ON b.adm4 = w.adm4
+           AND w.local_datetime = '{selected_time}'
+        ORDER BY b.adm4
     """
 
-    weather_df = run_query(query, conn)
-    boundary_index = pd.DataFrame(
-        {
-            "city_name": [
-                short_city_name(feature.get("properties", {}).get("city_name", ""))
-                for feature in boundary_geojson.get("features", [])
-            ]
-        }
-    )
-    boundary_index = (
-        boundary_index
-        .dropna(subset=["city_name"])
-        .query("city_name != ''")
-        .drop_duplicates(subset=["city_name"])
-        .sort_values("city_name")
-        .reset_index(drop=True)
-    )
+    # print(selected_time)
 
-    if weather_df.empty:
-        weather_df = pd.DataFrame(
-            columns=[
-                "city_name",
-                "local_datetime",
-                "avg_temperature_c",
-                "avg_humidity_ptg",
-                "avg_heat_index_c",
-                "weather_desc",
-                "risk_level",
-            ]
-        )
-    else:
-        weather_df["city_name"] = weather_df["kota_kabupaten"].apply(short_city_name)
-        weather_df = (
-            weather_df
-            .groupby("city_name", as_index=False)
-            .agg(
-                local_datetime=("local_datetime", "first"),
-                avg_temperature_c=("temperature_c", "mean"),
-                avg_humidity_ptg=("humidity_ptg", "mean"),
-                avg_heat_index_c=("heat_index_c", "mean"),
-                weather_desc=("weather_desc", most_common_weather),
-            )
-        )
-        weather_df["risk_level"] = weather_df["avg_heat_index_c"].apply(classify_city_risk)
+    merged = run_query(query, conn) # merging between weather and boundary data is done in SQL
 
-    merged = boundary_index.merge(weather_df, on="city_name", how="left")
-    merged["risk_level"] = merged["risk_level"].fillna("No Data")
-    merged["weather_desc"] = merged["weather_desc"].fillna("")
     merged["local_datetime"] = merged["local_datetime"].apply(format_timestamp)
 
     z = (
@@ -207,21 +300,21 @@ def create_dynamic_colormap(
         .to_numpy()
     )
 
-    customdata = np.column_stack([
-            merged["city_name"].astype(str).to_numpy(),
+    customdata = np.column_stack(
+        [
+            merged["desa_kelurahan"].astype(str).to_numpy(),
+            merged["kecamatan"].astype(str).to_numpy(),
             merged["local_datetime"].astype(str).to_numpy(),
-            merged["avg_heat_index_c"].to_numpy(dtype=object),
+            merged["heat_index_c"].to_numpy(dtype=object),
             merged["risk_level"].astype(str).to_numpy(),
             merged["weather_desc"].astype(str).to_numpy(),
-            merged["avg_temperature_c"].to_numpy(dtype=object),
-            merged["avg_humidity_ptg"].to_numpy(dtype=object),
-            merged["city_name"].astype(str).to_numpy(),
-        ])
+            merged["adm4"].astype(str).to_numpy(),
+        ]
+    )
 
     return {
         "z": z,
         "customdata": customdata,
-        "locations": merged["city_name"].astype(str).tolist(),
     }
 
 

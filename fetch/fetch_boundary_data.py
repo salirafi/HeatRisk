@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Build and save Jakarta city-level (kabupaten/kota) boundary data from RBI geodatabase from Badan Informasi Geospasial.
-Saving is done to GeoJSON for "Regional Info" page.
+Build and save Jakarta ward-level (desa/kelurahan) boundary data from BIG RBI geodatabase.
+Also export the ward adm4 codes into MySQL for LEFT JOINs used by the choropleth map.
 """
 
 from __future__ import annotations
@@ -11,25 +11,24 @@ from pathlib import Path
 import fiona
 import geopandas as gpd
 import pandas as pd
+from sqlalchemy import String, text
 
+import sys
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-GDB_PATH = BASE_DIR / "tables" / "RBI50K_ADMINISTRASI_KABKOTA_20230907.gdb"
-OUTPUT_GEOJSON = BASE_DIR / "tables" / "jakarta_city_boundary_simplified.geojson"
+from src.db import get_mysql_engine
+
+
+GDB_PATH = BASE_DIR / "tables" / "RBI10K_ADMINISTRASI_DESA_20230928.gdb"
+OUTPUT_GEOJSON = BASE_DIR / "tables" / "jakarta_boundary_simplified.geojson"
+
 # layer's name can be checked with the following code: print(fiona.listlayers(gdb_path)); see list_gdb_layers() function below
-GDB_LAYER_CANDIDATES = [
-    "ADMINISTRASI_AR_KABKOTA",
-    "ADMINISTRASI_AR_KAB_KOTA",
-]
+GDB_LAYER = ["ADMINISTRASI_AR_DESAKEL"]
 
-# the name for Jakarta in the GDB is "Kota Adm. Jakarta xxx"
-JAKARTA_CITIES = {
-    "KOTA ADM JAKARTA PUSAT",
-    "KOTA ADM JAKARTA UTARA",
-    "KOTA ADM JAKARTA BARAT",
-    "KOTA ADM JAKARTA SELATAN",
-    "KOTA ADM JAKARTA TIMUR",
-}
+BOUNDARY_INDEX_TABLE = "map_boundary_index"
+
 
 def clean_text(value: object) -> str | None:
     if value is None:
@@ -39,128 +38,120 @@ def clean_text(value: object) -> str | None:
     return str(value).strip().upper().replace(".", "")
 
 
-def short_city_name(name: object) -> str:
-    cleaned = clean_text(name)
-    if cleaned is None:
-        return ""
-
-    prefixes = [
-        "KOTA ADM ",
-        "KOTA ADMINISTRASI ",
-        "KABUPATEN ADM ",
-        "KABUPATEN ADMINISTRASI ",
-    ]
-    for prefix in prefixes:
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
-            break
-
-    return cleaned.title()
-
 def list_gdb_layers(gdb_path: Path) -> list[str]:
-    return fiona.listlayers(str(gdb_path))
+    return fiona.listlayers(str(gdb_path)) # return available layers inside the GDB.
 
 
 def resolve_layer_name(gdb_path: Path) -> str:
-    layers = list_gdb_layers(gdb_path)
+    layers = list_gdb_layers(gdb_path) 
 
-    for candidate in GDB_LAYER_CANDIDATES:
+    for candidate in GDB_LAYER:
         if candidate in layers:
             return candidate
 
     for layer in layers:
-        if "KAB" in layer.upper() and "KOTA" in layer.upper():
+        layer_upper = layer.upper()
+        if "DESA" in layer_upper or "KEL" in layer_upper:
             return layer
 
     raise ValueError(
-        f"Unable to locate a kabupaten/kota layer in {gdb_path}. Available layers: {layers}"
+        f"Unable to locate a ward-level boundary layer in {gdb_path}. Available layers: {layers}"
     )
 
 
-# pick the first existing column from the list of candidates to handle variations in column naming across different GDB versions
-def pick_first_existing_column(columns: list[str], candidates: list[str], label: str) -> str:
-    for candidate in candidates:
-        if candidate in columns:
-            return candidate
-    raise ValueError(f"Could not find a {label} column. Available columns: {columns}")
 
-# load the city boundary layer and keep only needed columns
-# this is at kabupaten/kota level, so one polygon corresponds to one Jakarta city
+
+# this is at desa/kelurahan level, so the code is the most granular one (adm4)
 def load_boundary_layer(gdb_path: Path, layer: str) -> gpd.GeoDataFrame:
     gdf = gpd.read_file(str(gdb_path), layer=layer)
-
-    city_col = pick_first_existing_column(
-        list(gdf.columns),
-        ["WADMKK", "NAMOBJ", "WADMKD"],
-        "city-name",
-    )
-    province_col = pick_first_existing_column(
-        list(gdf.columns),
-        ["WADMPR"],
-        "province-name",
-    )
+    columns = list(gdf.columns)
 
     # keep only useful columns and the geometry
-    gdf = gdf[[city_col, province_col, "geometry"]].copy()
-    gdf = gdf.rename(columns={city_col: "city_full_name", province_col: "province_name"})
+    gdf = gdf[["KDEPUM", "WADMKD", "WADMKC", "WADMKK", "WADMPR", "geometry"]].copy()
+    gdf = gdf.rename(
+        columns={
+            "KDEPUM": "adm4",
+            "WADMKD": "ward_name",
+            "WADMKC": "district_name",
+            "WADMKK": "city_name",
+            "WADMPR": "province_name",
+        }
+    )
 
-    for col in ["city_full_name", "province_name"]:
-        gdf[col] = gdf[col].astype(str).str.strip() # ensure all are strings and remove leading/trailing whitespace
+    for col in ["adm4", "ward_name", "district_name", "city_name", "province_name"]:
+        gdf[col] = gdf[col].astype(str).str.strip()
 
-    # create cleaned versions of the relevant columns for matching purposes
-    gdf["kotkab_clean"] = gdf["city_full_name"].apply(clean_text)
-    gdf["provinsi_clean"] = gdf["province_name"].apply(clean_text)
-    gdf["city_name"] = gdf["city_full_name"].apply(short_city_name)
+    gdf["province_clean"] = gdf["province_name"].apply(clean_text)
 
     return gdf
 
-# filters to only Jakarta's city boundaries
+# filters to only Jakarta's wards' boundaries
 def filter_jakarta_boundaries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    return gdf[
-        (gdf["provinsi_clean"] == "DKI JAKARTA")
-        & (gdf["kotkab_clean"].isin(JAKARTA_CITIES))
-    ].copy()
+    return gdf[gdf["province_clean"] == "DKI JAKARTA"].copy()
+
 
 # function to build the boundary table and export as GeoJSON
-def build_and_export_table(gdf: gpd.GeoDataFrame) -> pd.DataFrame:
-
-    gdf = gdf.copy()
-    gdf = gdf.to_crs(epsg=4326)
-    # gdf["geometry"] = gdf["geometry"].simplify(tolerance=0.001,preserve_topology=True) # save a simplified version of the geometry for faster loading
-    gdf["geometry"] = gdf.geometry.make_valid() # repair invalid geometries to be valid
+def build_and_export_geojson(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    export_gdf = gdf.copy()
+    export_gdf = export_gdf.to_crs(epsg=4326)
+    gdf["geometry"] = gdf["geometry"].simplify(tolerance=0.0005,preserve_topology=True) # save a simplified version of the geometry for faster loading
+    export_gdf["geometry"] = export_gdf.geometry.make_valid() # repair invalid geometries to be valid
 
     # look https://geopandas.org/en/stable/docs/user_guide/missing_empty.html for differences between empty and missing
-    gdf = gdf[gdf.geometry.notna()] # drop missing geometries
-    gdf = gdf[~gdf.geometry.is_empty] # drop empty geometries
+    export_gdf = export_gdf[export_gdf.geometry.notna()]
+    export_gdf = export_gdf[~export_gdf.geometry.is_empty]
 
-    gdf["city_name"] = gdf["city_name"].astype(str).str.strip()
-    gdf["city_full_name"] = gdf["city_full_name"].astype(str).str.strip()
-    gdf = gdf[gdf["city_name"] != ""].copy()
-    gdf = gdf.drop_duplicates(subset=["city_name"]).reset_index(drop=True)  # keep only one simplified polygon per city
-
-    # keep only the relevant columns and geometry for the Regional Info page
-    gdf = gdf[
-        [
-            "city_name",
-            "city_full_name",
-            "geometry",
-        ]
+    export_gdf = export_gdf.dropna(subset=["adm4"])
+    export_gdf = export_gdf[export_gdf["adm4"] != ""].copy()
+    export_gdf = export_gdf.drop_duplicates(subset=["adm4"]).reset_index(drop=True)  # keep only distinct region code values
+    export_gdf = export_gdf[
+        ["adm4", "geometry"] # keep only codes and geometry 
     ].copy()
 
     OUTPUT_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
-    gdf.to_file(OUTPUT_GEOJSON, driver="GeoJSON") # save as GeoJSON
+    export_gdf.to_file(OUTPUT_GEOJSON, driver="GeoJSON")
+    return export_gdf
 
-    return gdf
+# create boundary index to merge with weather table for choropleth plotting
+def export_boundary_index_to_mysql(gdf: gpd.GeoDataFrame, table_name: str) -> pd.DataFrame:
+    index_df = (
+        gdf[["adm4"]]
+        .dropna(subset=["adm4"])
+        .query("adm4 != ''")
+        .drop_duplicates(subset=["adm4"])
+        .sort_values("adm4")
+        .reset_index(drop=True)
+    )
+
+    engine = get_mysql_engine()
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+        conn.execute(text(f"""
+            CREATE TABLE {table_name} (
+                adm4 VARCHAR(32) NOT NULL,
+                PRIMARY KEY (adm4)
+            )
+        """))
+
+    index_df.to_sql(
+        table_name,
+        engine,
+        if_exists="append",
+        index=False,
+        dtype={"adm4": String(32)},
+    )
+
+    return index_df
+
 
 def main() -> None:
-
     layers = list_gdb_layers(GDB_PATH)
     layer = resolve_layer_name(GDB_PATH)
     gdf = load_boundary_layer(GDB_PATH, layer)
     gdf_jakarta = filter_jakarta_boundaries(gdf)
-    build_and_export_table(gdf_jakarta)
+    exported_gdf = build_and_export_geojson(gdf_jakarta)
+    index_df = export_boundary_index_to_mysql(exported_gdf, BOUNDARY_INDEX_TABLE)
 
-    print("")
     print("")
     print("=== Available GDB layers ===")
     print(layers)
@@ -168,8 +159,13 @@ def main() -> None:
     print("=== Selected layer ===")
     print(layer)
     print("")
-
+    print("=== Export summary ===")
+    print(f"Ward polygons exported: {len(exported_gdf)}")
+    print(f"MySQL rows exported to {BOUNDARY_INDEX_TABLE}: {len(index_df)}")
+    print(f"GeoJSON written to: {OUTPUT_GEOJSON}")
+    print("")
     print("=== Fetching done. ===")
+
 
 if __name__ == "__main__":
     main()

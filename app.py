@@ -657,14 +657,15 @@ def heat_risk_map(selected_idx, times_data):
     try:
         colormap = create_dynamic_colormap(
             selected_time=selected_time,
-            boundary_geojson=boundary_json,
+            # boundary_geojson=boundary_json,
             conn=conn,
         )
     finally:
         conn.close()
     fig = build_map_figure(
         boundary_geojson=boundary_json,
-        locations=colormap["locations"],
+        # locations=colormap["locations"],
+        locations=colormap["customdata"][:, -1].tolist(),
         colormap=colormap,
     )
 
