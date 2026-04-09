@@ -58,14 +58,17 @@ If the user wants to run [fetch_boundary_data.py](src/fetch_boundary_data.py), m
 │   ├── jakarta_city_boundary_simplified.geojson
 │
 ├── assets/                        # Static frontend assets
-│   ├── style.css                   # CSS styling
+│   ├── style.css                  # CSS styling
 │   └── ...   
 │
 ├── src/                           
-│   ├── constant.py                 # Global variables for app.py
-│   ├── db.py                       # Helpers for MySQL connection
+│   ├── constant.py                # Global variables for app.py
+│   ├── db.py                      # Helpers for MySQL connection
 │   ├── helpers.py                  
-│   └── plotting.py                 # Helpers for plotting functions
+│   └── plotting.py                # Helpers for plotting functions
+│
+├── api/
+│   ├── cron_refresh.py            # Perform cron job for Vercel
 │
 └── app.py                         # Entry point for Dash Plotly web app
 ```
