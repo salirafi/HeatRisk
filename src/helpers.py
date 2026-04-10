@@ -73,6 +73,21 @@ def load_boundary_data() -> dict:
 
     return geojson
 
+# query boundary index for identifying boundary data in choropleth map
+def load_map_boundary_index(conn) -> pd.DataFrame:
+    query = """
+        SELECT adm4
+        FROM map_boundary_index
+        ORDER BY adm4
+    """
+    df = run_query(query, conn)
+
+    if df.empty:
+        return pd.DataFrame(columns=["adm4"])
+
+    df["adm4"] = df["adm4"].astype(str).str.strip()
+    return df.drop_duplicates(subset=["adm4"]).reset_index(drop=True)
+
 # get unique timestamp values in weather data
 def available_timestamps(start_time: pd.Timestamp, end_time: pd.Timestamp, conn) -> list[pd.Timestamp]:
     query = f"""

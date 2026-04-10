@@ -142,6 +142,20 @@ def build_map_figure(
 
     return fig
 
+# make the building of base figure separate from the dynamic colormap
+def build_base_map_figure(
+    boundary_geojson: dict,
+) -> go.Figure():
+    empty_colormap = {
+        "z": [],
+        "customdata": [],
+    }
+    return build_map_figure(
+        boundary_geojson=boundary_geojson,
+        locations=[],
+        colormap=empty_colormap,
+    )
+
 
 def make_discrete_colorscale():
     """
@@ -266,29 +280,50 @@ def make_discrete_colorscale():
 
 def create_dynamic_colormap(
     selected_time: pd.Timestamp,
+    boundary_index: pd.DataFrame,
     conn,
 ):
     selected_time = pd.to_datetime(selected_time).strftime("%Y-%m-%d %H:%M:%S")
 
     query = f"""
         SELECT
-            b.adm4 AS adm4,
-            COALESCE(w.desa_kelurahan, '') AS desa_kelurahan,
-            COALESCE(w.kecamatan, '') AS kecamatan,
-            w.local_datetime AS local_datetime,
-            w.heat_index_c AS heat_index_c,
-            COALESCE(w.risk_level, 'No Data') AS risk_level,
-            COALESCE(w.weather_desc, '') AS weather_desc
-        FROM map_boundary_index b
-        LEFT JOIN {WEATHER_TABLE} w
-            ON b.adm4 = w.adm4
-           AND w.local_datetime = '{selected_time}'
-        ORDER BY b.adm4
+            adm4,
+            COALESCE(desa_kelurahan, '') AS desa_kelurahan,
+            COALESCE(kecamatan, '') AS kecamatan,
+            local_datetime,
+            heat_index_c,
+            COALESCE(risk_level, 'No Data') AS risk_level,
+            COALESCE(weather_desc, '') AS weather_desc
+        FROM {WEATHER_TABLE}
+        WHERE local_datetime = '{selected_time}'
+        ORDER BY adm4
     """
 
     # print(selected_time)
 
-    merged = run_query(query, conn) # merging between weather and boundary data is done in SQL
+    weather_df = run_query(query, conn)
+
+    if weather_df.empty:
+        weather_df = pd.DataFrame(
+            columns=[
+                "adm4",
+                "desa_kelurahan",
+                "kecamatan",
+                "local_datetime",
+                "heat_index_c",
+                "risk_level",
+                "weather_desc",
+            ]
+        )
+    else:
+        weather_df["adm4"] = weather_df["adm4"].astype(str).str.strip()
+
+    merged = boundary_index.merge(weather_df, on="adm4", how="left") # not using LEFT JOIN in SQL (slow cloud connection)
+
+    merged["desa_kelurahan"] = merged["desa_kelurahan"].fillna("")
+    merged["kecamatan"] = merged["kecamatan"].fillna("")
+    merged["risk_level"] = merged["risk_level"].fillna("No Data")
+    merged["weather_desc"] = merged["weather_desc"].fillna("")
 
     merged["local_datetime"] = merged["local_datetime"].apply(format_timestamp)
 
@@ -297,20 +332,21 @@ def create_dynamic_colormap(
         .map(RISK_CODE_MAP)
         .fillna(RISK_CODE_MAP["No Data"])
         .astype(float)
-        .to_numpy()
+        .tolist()
     )
 
-    customdata = np.column_stack(
+    customdata = [
         [
-            merged["desa_kelurahan"].astype(str).to_numpy(),
-            merged["kecamatan"].astype(str).to_numpy(),
-            merged["local_datetime"].astype(str).to_numpy(),
-            merged["heat_index_c"].to_numpy(dtype=object),
-            merged["risk_level"].astype(str).to_numpy(),
-            merged["weather_desc"].astype(str).to_numpy(),
-            merged["adm4"].astype(str).to_numpy(),
+            str(row["desa_kelurahan"]),
+            str(row["kecamatan"]),
+            str(row["local_datetime"]),
+            row["heat_index_c"],
+            str(row["risk_level"]),
+            str(row["weather_desc"]),
+            str(row["adm4"]),
         ]
-    )
+        for _, row in merged.iterrows()
+    ]
 
     return {
         "z": z,
@@ -340,7 +376,9 @@ def build_heat_index_plot(
     if y_min == y_max:
         y_min -= 1
         y_max += 1
+    
 
+    # fix positions for labels
     span = y_max - y_min
     pad = max(1.0, span * 0.18)
     label_top = y_max + (pad * 2.3)
@@ -421,7 +459,7 @@ def build_heat_index_plot(
         height=None,
         margin=dict(l=10, r=10, t=18, b=16),
         paper_bgcolor="rgba(0,0,0,0)", # transparent background
-        plot_bgcolor="rgba(0,0,0,0)", # transparent background
+        plot_bgcolor="rgba(0,0,0,0)",
         annotations=annotations,
         xaxis=dict(
             title=None,
@@ -452,3 +490,147 @@ def build_heat_index_plot(
     )
 
     return fig
+
+# like choropleth map, separate the building of base figure from dynamic data
+def build_base_heat_index_figure() -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_trace( # heat index curve
+        go.Scatter(
+            x=[],
+            y=[],
+            mode="lines+markers",
+            line=dict(color="#eb8531", width=3.5, shape="spline", smoothing=0.9),
+            marker=dict(size=11, color="#fffdf7", line=dict(width=2.2, color="#f1dd95")),
+            hovertemplate="<b>%{x|%H:%M}</b><br>Heat Index: %{y:.1f} Â°C<extra></extra>",
+            showlegend=False,
+        )
+    )
+    fig.add_trace( # temperature curve
+        go.Scatter(
+            x=[],
+            y=[],
+            mode="lines+markers",
+            line=dict(color="#31a2eb", width=3.5, shape="spline", smoothing=0.9),
+            marker=dict(size=11, color="#fffdf7", line=dict(width=2.2, color="#95c1f1")),
+            hovertemplate="<b>%{x|%H:%M}</b><br>Temperature: %{y:.1f} Â°C<extra></extra>",
+            showlegend=False,
+        )
+    )
+
+    fig.update_layout(
+        height=None,
+        margin=dict(l=10, r=10, t=18, b=16),
+        paper_bgcolor="rgba(0,0,0,0)", # transparent background
+        plot_bgcolor="rgba(0,0,0,0)",
+        annotations=[],
+        xaxis=dict(
+            title=None,
+            showgrid=False,
+            zeroline=False,
+            showline=False,
+            showticklabels=False,
+            fixedrange=True,
+        ),
+        yaxis=dict(
+            title=None,
+            range=[0, 1],
+            showgrid=False,
+            zeroline=False,
+            showline=False,
+            showticklabels=False,
+            fixedrange=True,
+        ),
+        hoverlabel=dict(
+            bgcolor="rgba(55, 72, 88, 0.96)",
+            font_size=13,
+            font_family="DM Sans, sans-serif",
+            font_color="#ffffff",
+            bordercolor="rgba(255,255,255,0.12)",
+            align="left",
+            namelength=-1,
+        ),
+    )
+
+    return fig
+
+# curve plot
+def build_heat_index_plot_state(
+    df: pd.DataFrame,
+) -> dict:
+
+    df = df.copy()
+    df["local_datetime"] = pd.to_datetime(df["local_datetime"], errors="coerce")
+    df = df.sort_values("local_datetime").reset_index(drop=True)
+
+    x_values = df["local_datetime"].tolist() # timestamp for x-axis
+    y_hi = df["heat_index_c"].tolist()
+    y_temp = df["temperature_c"].tolist()
+    y_humidity = df["humidity_ptg"].tolist()
+
+    y_min = min(y_hi + y_temp) # shared y-axis range for comparability
+    y_max = max(y_hi + y_temp) # shared y-axis range for comparability
+    if y_min == y_max:
+        y_min -= 1
+        y_max += 1
+
+    span = y_max - y_min
+    pad = max(1.0, span * 0.18)
+    label_top = y_max + (pad * 2.3)
+    label_mid = y_max + (pad * 1.45)
+    label_bottom = y_min - (pad * 1.5)
+
+    annotations = []
+    for x_val, temp_val, hi_val, humidity_val in zip(x_values, y_temp, y_hi, y_humidity):
+        annotations.extend(
+            [
+
+                # timestamp label
+                dict(
+                    x=x_val,
+                    y=label_bottom,
+                    text=pd.Timestamp(x_val).strftime("%d %b<br>%H:%M"),
+                    showarrow=False,
+                    font=dict(size=16, color="#35332f", family="DM Sans, sans-serif"),
+                    xanchor="center",
+                ),
+
+                # temperature label
+                dict(
+                    x=x_val,
+                    y=label_mid,
+                    text=f"{temp_val:.0f}°C",
+                    showarrow=False,
+                    font=dict(size=31, color="#35332f", family="DM Serif Display, serif"),
+                    xanchor="center",
+                ),
+
+                # heat index label
+                dict(
+                    x=x_val,
+                    y=label_mid - (pad * 0.78),
+                    text=f"HI {hi_val:.0f}°C",
+                    showarrow=False,
+                    font=dict(size=14, color="#35332f", family="DM Sans, sans-serif"),
+                    xanchor="center",
+                ),
+
+                # humidity label
+                dict(
+                    x=x_val,
+                    y=label_top,
+                    text=f"Humidity {humidity_val:.0f}%",
+                    showarrow=False,
+                    font=dict(size=14, color="#35332f", family="DM Sans, sans-serif"),
+                    xanchor="center",
+                ),
+            ]
+        )
+
+    return {
+        "x_values": x_values,
+        "y_hi": y_hi,
+        "y_temp": y_temp,
+        "annotations": annotations,
+        "yaxis_range": [label_bottom - (pad * 0.8), label_top + (pad * 0.6)],
+    }
