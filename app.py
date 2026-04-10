@@ -4,7 +4,7 @@ Source code to create the web app.
 The app window is built around the current Jakarta time.
 '''
 
-from dash import Dash, html, dcc, Input, Output, State, ctx
+from dash import Dash, html, dcc, Input, Output, State, Patch, ctx, no_update
 import pandas as pd
 
 from src.constant import (
@@ -19,6 +19,15 @@ from src.plotting import *
 from src.db import get_current_jakarta_time # current Jakarta time
 
 boundary_json = load_boundary_data() # city-level boundary GeoJSON dict for the Regional Info page
+conn = get_conn()
+try:
+    map_boundary_index_df = load_map_boundary_index(conn)
+finally:
+    conn.close()
+
+# pre-built figures
+base_map_figure = build_base_map_figure(boundary_json)
+base_heat_index_figure = build_base_heat_index_figure()
 
 app = Dash(__name__, suppress_callback_exceptions=True)
 
@@ -328,11 +337,11 @@ def map_layout():
                         className="map-section map-section-full",
                         children=[
                             dcc.Graph(
-                                id="heat_risk_map", figure=EMPTY_FIG,
+                                id="heat_risk_map", figure=base_map_figure,
                                 config={"displayModeBar": False},
                                 style={"height": "100%", "width": "100%"},
                             ),
-                            html.Div(id="map_legend", className="legend-container"),
+                            html.Div(build_map_legend(), id="map_legend", className="legend-container"),
                         ],
                     ),
                 ],
@@ -369,7 +378,7 @@ def build_location_content():
             className="evolution-section",
             children=[
                 dcc.Graph(
-                    id="evolution_timeline_ui", figure=EMPTY_FIG,
+                    id="evolution_timeline_ui", figure=base_heat_index_figure,
                     config={"displayModeBar": False},
                     style={"height": "100%", "width": "100%"},
                 ),
@@ -579,13 +588,21 @@ def future_forecast_cards_ui(selected_ward, times_data):
 )
 def evolution_timeline_ui(selected_ward, times_data):
     if not selected_ward:
-        return {}
+        return no_update
     df = load_future_forecast_df(selected_ward, times_data)
     if df.empty:
-        return {}
-    fig = build_heat_index_plot(df=df.head(6).copy())
-    fig.update_layout(uirevision="weather-timeline")
-    return fig
+        return no_update
+    plot_state = build_heat_index_plot_state(df=df.head(6).copy()) # get the most recent 18 hours (6 timestamps)
+    patched_figure = Patch()
+    patched_figure["data"][0]["x"] = plot_state["x_values"]
+    patched_figure["data"][0]["y"] = plot_state["y_hi"]
+    patched_figure["data"][1]["x"] = plot_state["x_values"]
+    patched_figure["data"][1]["y"] = plot_state["y_temp"]
+    patched_figure["layout"]["annotations"] = plot_state["annotations"]
+    patched_figure["layout"]["yaxis"]["range"] = plot_state["yaxis_range"]
+    patched_figure["layout"]["uirevision"] = "weather-timeline"
+    return patched_figure
+
 
 # callback for displaying the current time and database's timestamp
 @app.callback(
@@ -633,6 +650,7 @@ def time_slider(store_data):
     marks       = build_slider_marks(timestamps)
     return 0, len(timestamps) - 1, 0, marks # numbering marks (but later not shown in the app)
 
+
 @app.callback(
     Output("selected_map_time_text", "children"),
     Input("selected_time_idx",       "value"),
@@ -644,6 +662,7 @@ def selected_map_time_text(selected_idx, store_data):
         return "Map time: —"
     return f"Map time: {selected_time.strftime('%b %d  %H:%M')}"
 
+
 @app.callback(
     Output("heat_risk_map",       "figure"),
     Input("selected_time_idx",    "value"),
@@ -652,33 +671,25 @@ def selected_map_time_text(selected_idx, store_data):
 def heat_risk_map(selected_idx, times_data):
     selected_time = get_selected_time_from_store(selected_idx, times_data)
     if selected_time is None:
-        return {}
+        return no_update
     conn = get_conn()
     try:
         colormap = create_dynamic_colormap(
             selected_time=selected_time,
+            boundary_index=map_boundary_index_df,
             # boundary_geojson=boundary_json,
             conn=conn,
         )
     finally:
         conn.close()
-    fig = build_map_figure(
-        boundary_geojson=boundary_json,
-        # locations=colormap["locations"],
-        locations=colormap["customdata"][:, -1].tolist(),
-        colormap=colormap,
-    )
+    patched_figure = Patch()
+    patched_figure["data"][0]["z"] = colormap["z"]
+    patched_figure["data"][0]["customdata"] = colormap["customdata"]
+    patched_figure["data"][0]["locations"] = [row[-1] for row in colormap["customdata"]]
 
     # this does not change the UI, so it should be faster to load
-    fig.update_layout(uirevision="heat-risk-map")
-    return fig
-
-@app.callback(
-    Output("map_legend",          "children"),
-    Input("selected_time_idx",    "value"),
-)
-def map_legend(_):
-    return build_map_legend()
+    patched_figure["layout"]["uirevision"] = "heat-risk-map"
+    return patched_figure
 
 @app.callback(
     Output("guide-modal", "className"),
