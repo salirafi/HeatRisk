@@ -468,7 +468,7 @@ def should_refresh(conn, min_interval_hours: float | None = None) -> tuple[bool,
     return elapsed >= pd.Timedelta(hours=min_interval_hours), last_refresh
 
 
-# saving to MySQL database, with upsert logic to avoid creating duplicate rows for the same timestamp and region
+# saving to MySQL database by replacing the existing contents with the latest fetched dataset
 def save_to_mysql(df: pd.DataFrame, conn) -> None:
 
     if df.empty:
@@ -505,38 +505,28 @@ def save_to_mysql(df: pd.DataFrame, conn) -> None:
         for _, row in weather_df.iterrows()
     ]
 
-    # ON DUPLICATE KEY UPDATE will update the existing row if there is a conflict on the primary key (local_datetime, adm4)
-    # this is because the fetched time should overlap with the last fetched time (36 hours-interval while the data is in 72 hours range)
+    # rows are inserted in batches after clearing the existing table so that each refresh fully replaces the previous snapshot
     weather_sql = f"""
         INSERT INTO {WEATHER_TABLE} (
             adm4, desa_kelurahan, kecamatan, kota_kabupaten, provinsi,
-            latitude, longitude, timezone, local_datetime,
+            timezone, local_datetime,
             temperature_c, humidity_ptg, heat_index_c, risk_level,
             weather_desc, fetched_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            desa_kelurahan = VALUES(desa_kelurahan),
-            kecamatan = VALUES(kecamatan),
-            kota_kabupaten = VALUES(kota_kabupaten),
-            provinsi = VALUES(provinsi),
-            latitude = VALUES(latitude),
-            longitude = VALUES(longitude),
-            timezone = VALUES(timezone),
-            temperature_c = VALUES(temperature_c),
-            humidity_ptg = VALUES(humidity_ptg),
-            heat_index_c = VALUES(heat_index_c),
-            risk_level = VALUES(risk_level),
-            weather_desc = VALUES(weather_desc),
-            fetched_at = VALUES(fetched_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     cursor = conn.cursor()
-    for rows_chunk in chunk_rows(weather_rows): # execute the insert in chunks to avoid hitting MySQL limits on number of rows per insert
-        cursor.executemany(weather_sql, rows_chunk)
-
-    conn.commit()
-    cursor.close()
+    try:
+        cursor.execute(f"DELETE FROM {WEATHER_TABLE}")
+        for rows_chunk in chunk_rows(weather_rows): # execute the insert in chunks to avoid hitting database limits on number of rows per batch
+            cursor.executemany(weather_sql, rows_chunk)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
 
 
 def save_forecasts(df: pd.DataFrame) -> None:
