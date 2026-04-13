@@ -68,8 +68,6 @@ The app and fetch pipeline require a MySQL database connection. These variables 
 
 ```text
 .
-├── api/
-│   └── cron_refresh.py                  # Vercel cron endpoint
 ├── assets/
 │   ├── app.js                           
 │   ├── style.css                        
@@ -92,8 +90,7 @@ The app and fetch pipeline require a MySQL database connection. These variables 
 │   └── index.html                       
 ├── app.py                               
 ├── jakarta_reference.csv                # Ward reference table used by the fetch pipeline
-├── requirements.txt                    
-└── vercel.json                          # Vercel cron schedule configuration
+└── requirements.txt                    
 ```
 
 Note that the only time-dependent data in this project is the BMKG weather data, so the boundary polygon and region code will always be static values.
